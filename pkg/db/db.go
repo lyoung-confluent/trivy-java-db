@@ -45,10 +45,6 @@ func New(cacheDir string) (DB, error) {
 		return DB{}, xerrors.Errorf("can't open db: %w", err)
 	}
 
-	if _, err = db.Exec("PRAGMA foreign_keys=true"); err != nil {
-		return DB{}, xerrors.Errorf("failed to enable 'foreign_keys': %w", err)
-	}
-
 	return DB{
 		client: db,
 		dir:    dbDir,
@@ -56,6 +52,9 @@ func New(cacheDir string) (DB, error) {
 }
 
 func (db *DB) Init() error {
+	if _, err := db.client.Exec("PRAGMA foreign_keys=true"); err != nil {
+		return xerrors.Errorf("failed to enable 'foreign_keys': %w", err)
+	}
 	if _, err := db.client.Exec("CREATE TABLE artifacts(id INTEGER PRIMARY KEY, group_id TEXT, artifact_id TEXT)"); err != nil {
 		return xerrors.Errorf("unable to create 'artifacts' table: %w", err)
 	}
