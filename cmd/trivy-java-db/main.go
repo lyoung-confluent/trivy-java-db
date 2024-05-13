@@ -78,7 +78,7 @@ func build() error {
 	}
 	dbDir := filepath.Join(cacheDir, "db")
 	log.Printf("Database path: %s", dbDir)
-	dbc, err := db.New(dbDir)
+	dbc, err := db.NewRW(dbDir)
 	if err != nil {
 		return xerrors.Errorf("db create error: %w", err)
 	}

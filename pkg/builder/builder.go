@@ -20,12 +20,12 @@ import (
 const updateInterval = time.Hour * 72 // 3 days
 
 type Builder struct {
-	db    db.DB
+	db    db.RWDB
 	meta  db.Client
 	clock clock.Clock
 }
 
-func NewBuilder(db db.DB, meta db.Client) Builder {
+func NewBuilder(db db.RWDB, meta db.Client) Builder {
 	return Builder{
 		db:    db,
 		meta:  meta,

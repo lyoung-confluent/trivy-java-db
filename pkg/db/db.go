@@ -20,7 +20,6 @@ const (
 
 type DB struct {
 	client *sql.DB
-	dir    string
 }
 
 func path(cacheDir string) string {
@@ -31,113 +30,20 @@ func Reset(cacheDir string) error {
 	return os.RemoveAll(path(cacheDir))
 }
 
-func New(cacheDir string) (DB, error) {
-	dbPath := path(cacheDir)
-	dbDir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dbDir, 0700); err != nil {
-		return DB{}, xerrors.Errorf("failed to mkdir: %w", err)
-	}
-
+func Open(dsn string) (DB, error) {
 	// open db
-	var err error
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return DB{}, xerrors.Errorf("can't open db: %w", err)
 	}
 
-	if _, err = db.Exec("PRAGMA foreign_keys=true"); err != nil {
-		return DB{}, xerrors.Errorf("failed to enable 'foreign_keys': %w", err)
-	}
-
 	return DB{
 		client: db,
-		dir:    dbDir,
 	}, nil
 }
 
-func (db *DB) Init() error {
-	if _, err := db.client.Exec("CREATE TABLE artifacts(id INTEGER PRIMARY KEY, group_id TEXT, artifact_id TEXT)"); err != nil {
-		return xerrors.Errorf("unable to create 'artifacts' table: %w", err)
-	}
-	if _, err := db.client.Exec("CREATE TABLE indices(artifact_id INTEGER, version TEXT, sha1 BLOB, archive_type TEXT, foreign key (artifact_id) references artifacts(id))"); err != nil {
-		return xerrors.Errorf("unable to create 'indices' table: %w", err)
-	}
-
-	if _, err := db.client.Exec("CREATE UNIQUE INDEX artifacts_idx ON artifacts(artifact_id, group_id)"); err != nil {
-		return xerrors.Errorf("unable to create 'artifacts_idx' index: %w", err)
-	}
-	if _, err := db.client.Exec("CREATE INDEX indices_artifact_idx ON indices(artifact_id)"); err != nil {
-		return xerrors.Errorf("unable to create 'indices_artifact_idx' index: %w", err)
-	}
-	if _, err := db.client.Exec("CREATE UNIQUE INDEX indices_sha1_idx ON indices(sha1)"); err != nil {
-		return xerrors.Errorf("unable to create 'indices_sha1_idx' index: %w", err)
-	}
-	return nil
-}
-
-func (db *DB) Dir() string {
-	return db.dir
-}
-
-func (db *DB) VacuumDB() error {
-	if _, err := db.client.Exec("VACUUM"); err != nil {
-		return xerrors.Errorf("vacuum database error: %w", err)
-	}
-	return nil
-}
-
-func (db *DB) Close() error {
-	return db.client.Close()
-}
-
-//////////////////////////////////////
-// functions to interaction with DB //
-//////////////////////////////////////
-
-func (db *DB) InsertIndexes(indexes []types.Index) error {
-	if len(indexes) == 0 {
-		return nil
-	}
-	tx, err := db.client.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if err = db.insertArtifacts(tx, indexes); err != nil {
-		return xerrors.Errorf("insert error: %w", err)
-	}
-
-	for _, index := range indexes {
-		_, err = tx.Exec(`
-			INSERT INTO indices(artifact_id, version, sha1, archive_type)
-			VALUES (
-			        (SELECT id FROM artifacts 
-			            WHERE group_id=? AND artifact_id=?), 
-			        ?, ?, ?
-			) ON CONFLICT(sha1) DO NOTHING`,
-			index.GroupID, index.ArtifactID, index.Version, index.SHA1, index.ArchiveType)
-		if err != nil {
-			return xerrors.Errorf("unable to insert to 'indices' table: %w", err)
-		}
-	}
-
-	return tx.Commit()
-}
-
-func (db *DB) insertArtifacts(tx *sql.Tx, indexes []types.Index) error {
-	query := `INSERT OR IGNORE INTO artifacts(group_id, artifact_id) VALUES `
-	query += strings.Repeat("(?, ?), ", len(indexes))
-	query = strings.TrimSuffix(query, ", ")
-
-	var values []any
-	for _, index := range indexes {
-		values = append(values, index.GroupID, index.ArtifactID)
-	}
-	if _, err := tx.Exec(query, values...); err != nil {
-		return xerrors.Errorf("unable to insert to 'artifacts' table: %w", err)
-	}
-	return nil
+func New(cacheDir string) (DB, error) {
+	return Open(path(cacheDir) + "?mode=ro")
 }
 
 func (db *DB) SelectIndexBySha1(sha1 string) (types.Index, error) {
@@ -196,4 +102,104 @@ func (db *DB) SelectIndexesByArtifactIDAndFileType(artifactID, version string, f
 		indexes = append(indexes, index)
 	}
 	return indexes, nil
+}
+
+type RWDB struct {
+	DB
+}
+
+func (db *RWDB) Init() error {
+	if _, err := db.client.Exec("PRAGMA foreign_keys=true"); err != nil {
+		return xerrors.Errorf("failed to enable 'foreign_keys': %w", err)
+	}
+	if _, err := db.client.Exec("CREATE TABLE artifacts(id INTEGER PRIMARY KEY, group_id TEXT, artifact_id TEXT)"); err != nil {
+		return xerrors.Errorf("unable to create 'artifacts' table: %w", err)
+	}
+	if _, err := db.client.Exec("CREATE TABLE indices(artifact_id INTEGER, version TEXT, sha1 BLOB, archive_type TEXT, foreign key (artifact_id) references artifacts(id))"); err != nil {
+		return xerrors.Errorf("unable to create 'indices' table: %w", err)
+	}
+
+	if _, err := db.client.Exec("CREATE UNIQUE INDEX artifacts_idx ON artifacts(artifact_id, group_id)"); err != nil {
+		return xerrors.Errorf("unable to create 'artifacts_idx' index: %w", err)
+	}
+	if _, err := db.client.Exec("CREATE INDEX indices_artifact_idx ON indices(artifact_id)"); err != nil {
+		return xerrors.Errorf("unable to create 'indices_artifact_idx' index: %w", err)
+	}
+	if _, err := db.client.Exec("CREATE UNIQUE INDEX indices_sha1_idx ON indices(sha1)"); err != nil {
+		return xerrors.Errorf("unable to create 'indices_sha1_idx' index: %w", err)
+	}
+	return nil
+}
+
+func (db *RWDB) VacuumDB() error {
+	if _, err := db.client.Exec("VACUUM"); err != nil {
+		return xerrors.Errorf("vacuum database error: %w", err)
+	}
+	return nil
+}
+
+func (db *RWDB) Close() error {
+	return db.client.Close()
+}
+
+//////////////////////////////////////
+// functions to interaction with DB //
+//////////////////////////////////////
+
+func (db *RWDB) InsertIndexes(indexes []types.Index) error {
+	if len(indexes) == 0 {
+		return nil
+	}
+	tx, err := db.client.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err = db.insertArtifacts(tx, indexes); err != nil {
+		return xerrors.Errorf("insert error: %w", err)
+	}
+
+	for _, index := range indexes {
+		_, err = tx.Exec(`
+			INSERT INTO indices(artifact_id, version, sha1, archive_type)
+			VALUES (
+			        (SELECT id FROM artifacts 
+			            WHERE group_id=? AND artifact_id=?), 
+			        ?, ?, ?
+			) ON CONFLICT(sha1) DO NOTHING`,
+			index.GroupID, index.ArtifactID, index.Version, index.SHA1, index.ArchiveType)
+		if err != nil {
+			return xerrors.Errorf("unable to insert to 'indices' table: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (db *RWDB) insertArtifacts(tx *sql.Tx, indexes []types.Index) error {
+	query := `INSERT OR IGNORE INTO artifacts(group_id, artifact_id) VALUES `
+	query += strings.Repeat("(?, ?), ", len(indexes))
+	query = strings.TrimSuffix(query, ", ")
+
+	var values []any
+	for _, index := range indexes {
+		values = append(values, index.GroupID, index.ArtifactID)
+	}
+	if _, err := tx.Exec(query, values...); err != nil {
+		return xerrors.Errorf("unable to insert to 'artifacts' table: %w", err)
+	}
+	return nil
+}
+
+func NewRW(cacheDir string) (RWDB, error) {
+	if err := os.MkdirAll(cacheDir, 0700); err != nil {
+		return RWDB{}, xerrors.Errorf("failed to mkdir: %w", err)
+	}
+
+	db, err := Open(path(cacheDir) + "?mode=rwc")
+	if err != nil {
+		return RWDB{}, xerrors.Errorf("failed to open db: %w", err)
+	}
+	return RWDB{db}, nil
 }
